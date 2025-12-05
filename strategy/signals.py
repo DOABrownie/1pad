@@ -1,114 +1,141 @@
-from typing import Dict, List, Optional
+from typing import Optional, Dict, Any
 
 import pandas as pd
 
-from .pivots import detect_pivots
-from .structure import detect_break_of_structure
-from .fibs import compute_fib_levels
+
+Signal = Dict[str, Any]
 
 
-def generate_signals(
-    df: pd.DataFrame,
-    config: Dict,
-) -> Optional[Dict]:
+def generate_signal(df: pd.DataFrame, config: Dict[str, Any]) -> Optional[Signal]:
     """
-    Very high-level strategy stub.
+    Strategy dispatcher.
 
-    Input:
-      df: closed candles
-      config: includes things like num_limit_orders, etc.
+    Looks at config['strategy'] and calls the appropriate strategy-specific
+    signal generator, which returns a generic 'signal' dict or None.
 
-    Output:
-      Either:
-        None  -> no new setup
-      Or:
-        {
-          "direction": "long" or "short",
-          "entries": [price1, price2, ...],
-          "stop_loss": sl_price,
-          "take_profit": tp_price,
-          "meta": {...}
-        }
+    The engine will NOT decide what kind of orders to create.
+    The strategy decides and encodes that decision in the 'signal_type' field.
+
+    Signal contract (for now):
+
+        None -> no new setup on this bar
+
+        dict with at least:
+            {
+                "strategy": "sma" or "1pad",
+                "signal_type": "market_entry" or "limit_bundle",
+                "direction": "long" or "short",
+                "entries": [float, ...],  # list of proposed entry prices
+                "stop_loss": float,
+                "take_profit": float,
+                "meta": dict,             # optional extra info
+            }
+
+    For the SMA test strategy:
+        - signal_type = "market_entry"
+        - entries     = [current_close]
+        - direction   = "long"
+        - stop_loss   = entry * 0.97
+        - take_profit = entry * 1.03
+
+    For the future 1pad strategy:
+        - we will likely have:
+            signal_type = "limit_bundle"
+            entries     = [entry1, entry2, ...]  (fib-based limit levels)
     """
-    if df.empty or len(df) < 30:
+    strategy_name = config.get("strategy", "sma").lower()
+
+    if strategy_name == "sma":
+        return _sma_generate_signal(df, config)
+    elif strategy_name == "1pad":
+        return _onepad_generate_signal(df, config)
+    else:
+        # Unknown strategy -> do nothing
         return None
 
-    # Step 1: detect pivots
-    df_pivots, pivot_highs, pivot_lows = detect_pivots(df)
 
-    # Step 2: detect BOS
-    df_bos, bos_up, bos_down = detect_break_of_structure(
-        df_pivots, pivot_highs, pivot_lows
-    )
+def _sma_generate_signal(
+    df: pd.DataFrame,
+    config: Dict[str, Any],
+) -> Optional[Signal]:
+    """
+    Very basic 10/50 SMA bullish crossover strategy.
 
-    # Placeholder logic:
-    # - If the latest bar has a bullish BOS, define a long setup using
-    #   the most recent pivot low and high as the swing.
-    # - Similarly for bearish BOS.
-    last_index = df_bos.index[-1]
+    Entry condition:
+      - 10-period SMA crosses UP over 50-period SMA
+        on the current bar.
 
-    if df_bos["bos_up"].iloc[-1]:
-        # Find last pivot low and high before BOS
-        last_pivot_low_idx = pivot_lows.dropna().index[-1]
-        last_pivot_high_idx = pivot_highs.dropna().index[-1]
+    Order semantics:
+      - direction   = "long"
+      - entry_price = current close
+      - stop_loss   = entry_price * 0.97  (approx -3%)
+      - take_profit = entry_price * 1.03  (approx +3%)
 
-        swing_low = pivot_lows.loc[last_pivot_low_idx]
-        swing_high = pivot_highs.loc[last_pivot_high_idx]
+    This is deliberately simple and is intended only as a test harness
+    for the engine and replay logic.
+    """
+    # Need enough history for the SMAs
+    if len(df) < 51:
+        return None
 
-        fibs = compute_fib_levels(swing_low, swing_high, direction="long")
+    closes = df["close"]
 
-        # Example: use 0.5 and 0.618 fib levels as entries
-        entries = [
-            fibs.get("0.5"),
-            fibs.get("0.618"),
-        ]
-        entries = [e for e in entries if e is not None]
+    # Compute SMAs on the fly for now.
+    # Later we can compute these once in the engine and reuse.
+    sma_fast = closes.rolling(10).mean()
+    sma_slow = closes.rolling(50).mean()
 
-        if not entries:
-            return None
+    i = len(df) - 1  # current bar index
 
-        stop_loss = swing_low
-        take_profit = swing_high + (swing_high - swing_low)  # placeholder RR=1:1
+    fast_now = sma_fast.iloc[i]
+    slow_now = sma_slow.iloc[i]
+    fast_prev = sma_fast.iloc[i - 1]
+    slow_prev = sma_slow.iloc[i - 1]
 
-        return {
-            "direction": "long",
-            "entries": entries,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "meta": {
-                "signal_time": last_index,
-            },
-        }
+    # If any SMA value is NaN, skip.
+    if any(pd.isna(x) for x in (fast_now, slow_now, fast_prev, slow_prev)):
+        return None
 
-    if df_bos["bos_down"].iloc[-1]:
-        last_pivot_low_idx = pivot_lows.dropna().index[-1]
-        last_pivot_high_idx = pivot_highs.dropna().index[-1]
+    # Bullish crossover: fast crosses above slow
+    crossed_up = fast_now > slow_now and fast_prev <= slow_prev
+    if not crossed_up:
+        return None
 
-        swing_low = pivot_lows.loc[last_pivot_low_idx]
-        swing_high = pivot_highs.loc[last_pivot_high_idx]
+    entry = closes.iloc[i]
+    tp = entry * 1.03
+    sl = entry * 0.97
 
-        fibs = compute_fib_levels(swing_low, swing_high, direction="short")
+    signal: Signal = {
+        "strategy": "sma",
+        "signal_type": "market_entry",  # important for the engine
+        "direction": "long",
+        "entries": [float(entry)],      # single market entry at current close
+        "stop_loss": float(sl),
+        "take_profit": float(tp),
+        "meta": {
+            "sma_fast": float(fast_now),
+            "sma_slow": float(slow_now),
+        },
+    }
 
-        entries = [
-            fibs.get("0.5"),
-            fibs.get("0.618"),
-        ]
-        entries = [e for e in entries if e is not None]
+    return signal
 
-        if not entries:
-            return None
 
-        stop_loss = swing_high
-        take_profit = swing_low - (swing_high - swing_low)
+def _onepad_generate_signal(
+    df: pd.DataFrame,
+    config: Dict[str, Any],
+) -> Optional[Signal]:
+    """
+    Placeholder for the real 1pad strategy.
 
-        return {
-            "direction": "short",
-            "entries": entries,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "meta": {
-                "signal_time": last_index,
-            },
-        }
+    Eventually this will implement:
+      - pivot highs/lows
+      - break of structure
+      - fib levels
+      - multiple limit entry orders, etc.
 
+    The important part is that it returns the SAME signal shape as _sma_generate_signal,
+    so the engine and replay code do not need to change when 1pad is implemented.
+    """
+    # For now, we do nothing for 1pad until the real logic is ready.
     return None

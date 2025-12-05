@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 import pandas as pd
 import dash
@@ -10,11 +10,13 @@ from app_logging.event_logger import get_logger
 
 logger = get_logger(__name__)
 
-# We will store df in a module-level variable for this simple local viewer.
+# We will store df and trades in module-level variables for this simple local viewer.
 _DF: Optional[pd.DataFrame] = None
+_TRADES: Optional[List[Dict[str, Any]]] = None
+_STRATEGY: str = "sma"
 
 # Number of bars to keep visible in the replay window
-WINDOW_SIZE = 100
+WINDOW_SIZE = 200
 
 
 def _build_figure(end_index: int) -> go.Figure:
@@ -24,11 +26,14 @@ def _build_figure(end_index: int) -> go.Figure:
     Uses:
       - Dark mode styling
       - Crosshair-like spikelines
-      - A sliding window (last WINDOW_SIZE bars) so candles do not shrink
-        to tiny size as replay progresses.
+      - A sliding window (last WINDOW_SIZE bars)
+      - SMA 10 and SMA 50 lines (if present)
+      - Trade overlays for entries and TP/SL levels
     """
-    global _DF
+    global _DF, _TRADES
     df = _DF
+    trades = _TRADES or []
+
     if df is None or df.empty:
         return go.Figure()
 
@@ -38,6 +43,8 @@ def _build_figure(end_index: int) -> go.Figure:
     # Sliding window: last WINDOW_SIZE bars
     start_index = max(0, end_index - WINDOW_SIZE + 1)
     df_slice = df.iloc[start_index : end_index + 1]
+
+    # --------------- Candles ---------------
 
     candle = go.Candlestick(
         x=df_slice.index,
@@ -56,6 +63,135 @@ def _build_figure(end_index: int) -> go.Figure:
     )
 
     fig = go.Figure(data=[candle])
+
+    # --------------- SMAs (if available and strategy == 'sma') ---------------
+
+    if _STRATEGY == "sma":
+        if "sma_fast" in df_slice.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df_slice.index,
+                    y=df_slice["sma_fast"],
+                    mode="lines",
+                    name="SMA 10",
+                    line=dict(width=1),
+                    hoverinfo="skip",
+                )
+            )
+
+        if "sma_slow" in df_slice.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df_slice.index,
+                    y=df_slice["sma_slow"],
+                    mode="lines",
+                    name="SMA 50",
+                    line=dict(width=1),
+                    hoverinfo="skip",
+                )
+            )
+
+    # --------------- Trade overlays ---------------
+
+    entries_x = []
+    entries_y = []
+
+    tp_x = []
+    tp_y = []
+    sl_x = []
+    sl_y = []
+
+    for tr in trades:
+        entry_idx = tr["entry_index"]
+        exit_idx = tr["exit_index"]
+        entry_price = tr["entry_price"]
+        tp = tr["take_profit"]
+        sl = tr["stop_loss"]
+
+        # Only consider trades that have started by end_index
+        if entry_idx > end_index:
+            continue
+
+        # Only draw segments that overlap the current window
+        seg_start = max(entry_idx, start_index)
+        seg_end = min(exit_idx, end_index)
+        if seg_start > seg_end:
+            continue
+
+        # Entry marker (only once, at entry bar)
+        if start_index <= entry_idx <= end_index:
+            entries_x.append(df.index[entry_idx])
+            entries_y.append(entry_price)
+
+        # TP line segment
+        tp_x.extend(
+            [
+                df.index[seg_start],
+                df.index[seg_end],
+                None,
+            ]
+        )
+        tp_y.extend(
+            [
+                tp,
+                tp,
+                None,
+            ]
+        )
+
+        # SL line segment
+        sl_x.extend(
+            [
+                df.index[seg_start],
+                df.index[seg_end],
+                None,
+            ]
+        )
+        sl_y.extend(
+            [
+                sl,
+                sl,
+                None,
+            ]
+        )
+
+    if entries_x:
+        fig.add_trace(
+            go.Scatter(
+                x=entries_x,
+                y=entries_y,
+                mode="markers",
+                name="Entries",
+                marker=dict(size=8, symbol="triangle-up"),
+                hovertemplate="Entry<br>Time: %{x}<br>Price: %{y}<extra></extra>",
+            )
+        )
+
+    if tp_x:
+        fig.add_trace(
+            go.Scatter(
+                x=tp_x,
+                y=tp_y,
+                mode="lines",
+                name="Take Profit",
+                line=dict(width=1, dash="dash"),
+                hoverinfo="skip",
+            )
+        )
+
+    if sl_x:
+        fig.add_trace(
+            go.Scatter(
+                x=sl_x,
+                y=sl_y,
+                mode="lines",
+                name="Stop Loss",
+                line=dict(width=1, dash="dot"),
+                hoverinfo="skip",
+            )
+        )
+
+    # --------------- Layout ---------------
 
     fig.update_layout(
         template="plotly_dark",
@@ -87,17 +223,31 @@ def _build_figure(end_index: int) -> go.Figure:
     return fig
 
 
-def run_replay_viewer(df: pd.DataFrame, symbol: str, timeframe: str):
+def run_replay_viewer(
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    trades: Optional[List[Dict[str, Any]]] = None,
+    strategy: str = "sma",
+):
     """
     Start a Dash app that replays candles bar-by-bar.
 
     Controls:
       - Play / Pause buttons
       - Speed selector (Slow / Normal / Fast)
-      - Skip to End button (instantly plot all candles)
+      - End button (instantly jump to final bar)
+
+    Visuals:
+      - Candlesticks
+      - SMA 10 and SMA 50 (if present)
+      - Entry markers
+      - TP and SL horizontal bands
     """
-    global _DF
+    global _DF, _TRADES, _STRATEGY
     _DF = df.copy()
+    _TRADES = trades or []
+    _STRATEGY = strategy.lower()
 
     if _DF.empty:
         logger.warning("Replay viewer started with empty dataframe.")
@@ -163,7 +313,6 @@ def run_replay_viewer(df: pd.DataFrame, symbol: str, timeframe: str):
                                 clearable=False,
                                 style={
                                     "width": "150px",
-                                    # Dark-mode dropdown styling
                                     "backgroundColor": "#222222",
                                     "color": "#FFFFFF",
                                 },
@@ -211,7 +360,6 @@ def run_replay_viewer(df: pd.DataFrame, symbol: str, timeframe: str):
 
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
-        # Map speed labels to interval in ms
         speed_map = {
             "slow": 1000,
             "normal": 400,
@@ -224,7 +372,6 @@ def run_replay_viewer(df: pd.DataFrame, symbol: str, timeframe: str):
         elif trigger_id == "btn-pause":
             disabled = True
         else:
-            # speed change only; keep current disabled state
             disabled = _dash.no_update
 
         return disabled, interval
@@ -240,7 +387,7 @@ def run_replay_viewer(df: pd.DataFrame, symbol: str, timeframe: str):
     def update_chart(n_intervals, end_clicks, current_index):
         """
         Advance the current index by one bar on each interval tick,
-        OR jump straight to the final bar when the End button is clicked.
+        or jump straight to the final bar when the End button is clicked.
         """
         import dash as _dash
 
@@ -257,14 +404,12 @@ def run_replay_viewer(df: pd.DataFrame, symbol: str, timeframe: str):
         trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
 
         if trigger_id == "btn-end":
-            # Jump straight to final bar
             end_index = len(_DF) - 1
             fig = _build_figure(end_index)
             return fig, end_index
 
-        # Otherwise, this is a replay-interval tick
+        # Interval tick
         if current_index >= len(_DF) - 1:
-            # Already at the end, nothing more to do
             return _build_figure(current_index), current_index
 
         next_index = current_index + 1

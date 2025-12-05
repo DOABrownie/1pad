@@ -1,31 +1,13 @@
 from typing import Dict
 
-# Valid Binance/ccxt timeframes we support.
 BINANCE_TIMEFRAMES = [
-    "1m",
-    "3m",
-    "5m",
-    "15m",
-    "30m",
-    "1h",
-    "2h",
-    "4h",
-    "6h",
-    "8h",
-    "12h",
-    "1d",
-    "3d",
-    "1w",
-    "1M",
+    "1m", "3m", "5m", "15m", "30m",
+    "1h", "2h", "4h", "6h", "8h", "12h",
+    "1d", "3d", "1w", "1M",
 ]
 
 
 def get_run_mode() -> str:
-    """
-    Ask the user whether to run in LIVE or BACKTEST mode.
-
-    If the user just presses Enter, we default to 'backtest'.
-    """
     default = "backtest"
     prompt = f"Run mode [live/backtest] [{default}]: "
 
@@ -39,45 +21,47 @@ def get_run_mode() -> str:
 
 
 def _prompt_timeframe(default: str = "4h") -> str:
-    """
-    Prompt the user for a timeframe until a valid one is entered.
-
-    If the user just presses Enter, the default is used.
-    """
     allowed_str = ", ".join(BINANCE_TIMEFRAMES)
-
     while True:
         raw = input(
             f"Timeframe (one of: {allowed_str}) [{default}]: "
         ).strip()
-
-        # Default choice
         if raw == "":
             return default
-
-        # Remove internal spaces like "4 h" -> "4h"
         candidate = raw.replace(" ", "")
-
         if candidate in BINANCE_TIMEFRAMES:
             return candidate
-
         print(
             f"'{raw}' is not a valid timeframe.\n"
             f"Please type one of: {allowed_str}\n"
         )
 
 
-def get_user_config(live_mode: bool = True) -> Dict:
+def _prompt_strategy(default: str = "sma") -> str:
     """
-    Collect configuration from the user via CLI prompts.
+    Ask which strategy to use.
 
-    live_mode:
-      - True  -> do not ask for backtest-specific options like preview_replay
-      - False -> include backtest options
+    For now we support:
+      - 'sma'   : simple 10/50 SMA crossover test strategy
+      - '1pad'  : real strategy (placeholder for now)
+
+    Later we can add more names without changing callers.
     """
+    valid = {"sma", "1pad"}
+    prompt = f"Strategy [sma/1pad] [{default}]: "
+
+    while True:
+        raw = input(prompt).strip().lower()
+        if raw == "":
+            return default
+        if raw in valid:
+            return raw
+        print("Please type 'sma' or '1pad'.")
+
+
+def get_user_config(live_mode: bool = True) -> Dict:
     print("=== Trading Bot Configuration ===")
 
-    # Defaults you requested
     default_symbol = "BTC/USDT"
     default_timeframe = "4h"
     default_account_size = 2000.0
@@ -92,6 +76,9 @@ def get_user_config(live_mode: bool = True) -> Dict:
         symbol = default_symbol
 
     timeframe = _prompt_timeframe(default=default_timeframe)
+
+    # 👇 NEW: strategy selection
+    strategy = _prompt_strategy(default="sma")
 
     account_size_str = input(
         f"Account size in USD [{int(default_account_size)}]: "
@@ -122,12 +109,12 @@ def get_user_config(live_mode: bool = True) -> Dict:
         preview_replay = False
     else:
         preview_str = input("Preview backtest replay? [Y/n]: ").strip().lower()
-        # Default is YES if user just presses Enter
         preview_replay = (preview_str != "n")
 
     config = {
         "symbol": symbol,
         "timeframe": timeframe,
+        "strategy": strategy,          # 👈 important
         "account_size": account_size,
         "risk_pct": risk_pct,
         "lookback_bars": lookback_bars,
