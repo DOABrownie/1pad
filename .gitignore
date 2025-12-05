@@ -1,0 +1,22 @@
+# Python virtual environments
+venv/
+.venv/
+
+# Python bytecode / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# VS Code settings
+.vscode/
+
+# Logs
+logs/
+*.log
+
+# Environment variables
+.env
+
+# Dash / Plotly cache (if any)
+.cache/

@@ -1,6 +1,6 @@
 from typing import Dict
 
-from logging.event_logger import get_logger
+from app_logging.event_logger import get_logger
 
 logger = get_logger(__name__)
 

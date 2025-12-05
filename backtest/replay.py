@@ -3,7 +3,7 @@ from typing import List, Callable, Any
 import pandas as pd
 
 from execution.orders import Trade
-from logging.event_logger import get_logger
+from app_logging.event_logger import get_logger
 
 logger = get_logger(__name__)
 

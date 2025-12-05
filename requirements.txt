@@ -1,0 +1,8 @@
+pandas
+numpy
+ccxt
+dash
+plotly
+websockets
+python-dotenv
+aiohttp
