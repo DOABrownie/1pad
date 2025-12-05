@@ -6,10 +6,7 @@ from app_logging.event_logger import get_logger
 logger = get_logger(__name__)
 
 
-def compute_metrics(
-    trades: List[Trade],
-    starting_balance: float,
-) -> Dict:
+def compute_metrics(trades: List[Trade], starting_balance: float) -> Dict:
     """
     Compute simple backtest metrics from a list of trades.
     """
@@ -17,13 +14,13 @@ def compute_metrics(
 
     ending_balance = starting_balance + sum(t.pnl_usd for t in closed_trades)
     net_profit = ending_balance - starting_balance
-    net_return_pct = (net_profit / starting_balance) * 100 if starting_balance > 0 else 0.0
+    net_return_pct = (
+        (net_profit / starting_balance) * 100.0 if starting_balance > 0 else 0.0
+    )
 
     num_trades = len(closed_trades)
     wins = [t for t in closed_trades if t.pnl_usd > 0]
-    losses = [t for t in closed_trades if t.pnl_usd <= 0]
-
-    win_rate = (len(wins) / num_trades * 100) if num_trades > 0 else 0.0
+    win_rate = (len(wins) / num_trades * 100.0) if num_trades > 0 else 0.0
 
     durations = []
     for t in closed_trades:

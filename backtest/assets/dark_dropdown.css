@@ -1,0 +1,36 @@
+/* Dark mode styling for Dash react-select dropdown used by dcc.Dropdown */
+
+/* The closed control box */
+.Select-control {
+  background-color: #222222 !important;
+  color: #ffffff !important;
+  border-color: #555555 !important;
+}
+
+/* The text inside when a value is selected */
+.Select-value-label {
+  color: #ffffff !important;
+}
+
+/* The placeholder text */
+.Select-placeholder {
+  color: #aaaaaa !important;
+}
+
+/* The dropdown menu container */
+.Select-menu-outer {
+  background-color: #222222 !important;
+  border-color: #555555 !important;
+}
+
+/* Each option in the menu */
+.Select-option {
+  background-color: #222222 !important;
+  color: #ffffff !important;
+}
+
+/* Option under hover / keyboard focus */
+.Select-option.is-focused {
+  background-color: #444444 !important;
+  color: #ffffff !important;
+}

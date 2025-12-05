@@ -6,28 +6,24 @@ logger = get_logger(__name__)
 class DiscordNotifier:
     """
     Wrapper around your existing Discord notification logic.
-
-    You can plug in webhook URL or bot token here.
+    Right now this just logs messages. You can plug in real webhook calls later.
     """
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
-        # TODO: add webhook URL or other credentials here
+        # TODO: add webhook URL or bot token here
 
     def _send(self, message: str):
         if not self.enabled:
             return
-        # TODO: implement actual HTTP request to Discord webhook.
+        # TODO: replace this with a real HTTP POST to Discord webhook.
         logger.info(f"[DISCORD] {message}")
 
     def notify_trade_opened(self, trade_info: dict):
-        msg = f"Trade opened: {trade_info}"
-        self._send(msg)
+        self._send(f"Trade opened: {trade_info}")
 
     def notify_trade_closed(self, trade_info: dict):
-        msg = f"Trade closed: {trade_info}"
-        self._send(msg)
+        self._send(f"Trade closed: {trade_info}")
 
     def notify_backtest_finished(self, summary: dict):
-        msg = f"Backtest finished: {summary}"
-        self._send(msg)
+        self._send(f"Backtest finished: {summary}")

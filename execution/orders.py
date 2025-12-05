@@ -64,7 +64,6 @@ class Trade:
     opened_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
 
-    # Basic PnL fields (for backtesting and reporting)
     entry_price_avg: Optional[float] = None
     exit_price: Optional[float] = None
     size_total: float = 0.0
@@ -77,18 +76,16 @@ class OrderManager:
     """
     Responsible for placing and tracking orders.
 
-    In LIVE mode:
-      - Will be wired to a real ccxt exchange.
+    LIVE mode:
+      - will be wired to ccxt.
 
-    In BACKTEST mode:
-      - Can be backed by a simulated execution engine.
+    BACKTEST mode:
+      - will be backed by a simulated execution engine.
     """
 
     def __init__(self, exchange=None, simulate_only: bool = True):
         self.exchange = exchange
         self.simulate_only = simulate_only
-
-    # --- Public API stubs we will flesh out later ---
 
     def place_limit_orders_for_trade(
         self,
@@ -100,10 +97,7 @@ class OrderManager:
     ) -> Trade:
         """
         Create a set of limit orders (scaled entries) with a common SL/TP.
-
-        For now, this only logs the intent. Later we will:
-          - send orders via ccxt (LIVE)
-          - or simulate fills (BACKTEST)
+        For now, this only logs the intent and attaches Order objects to the Trade.
         """
         logger.info(
             f"Placing limit orders for trade {trade.id}: "
@@ -113,9 +107,9 @@ class OrderManager:
         trade.stop_loss = stop_loss
         trade.take_profit = take_profit
 
-        for i, (entry_price, size) in enumerate(zip(entries, sizes), start=1):
+        for entry_price, size in zip(entries, sizes):
             order = Order(
-                id=None,  # ccxt order id will be set after sending
+                id=None,  # real exchange order id will be filled in LIVE mode
                 symbol=trade.symbol,
                 side=OrderSide.BUY if trade.direction == "long" else OrderSide.SELL,
                 type=OrderType.LIMIT,
@@ -125,28 +119,3 @@ class OrderManager:
             trade.entry_orders.append(order)
 
         return trade
-
-    def sync_orders_with_exchange(self, trade: Trade):
-        """
-        Placeholder for future implementation.
-
-        LIVE:
-          - Query open orders, update their statuses in the Trade object.
-
-        BACKTEST:
-          - Execution engine will manage fills, this might be a no-op here.
-        """
-        logger.debug(f"Syncing orders with exchange for trade {trade.id} (stub).")
-
-    def close_trade_at_market(self, trade: Trade, current_price: float):
-        """
-        Placeholder for closing a trade at market price.
-
-        In LIVE mode we will:
-          - Submit a market order to close the remaining position.
-
-        For now this only logs the intent.
-        """
-        logger.info(
-            f"Closing trade {trade.id} at market price {current_price} (stub)."
-        )
