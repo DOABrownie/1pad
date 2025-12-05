@@ -1,0 +1,10 @@
+# Example settings file (not yet wired into code).
+# In the future we can load these defaults instead of prompting every time.
+
+symbol: "BTC/USDT"
+timeframe: "5m"
+account_size: 2000.0
+risk_pct: 0.02           # 2%
+lookback_bars: 1000
+num_limit_orders: 3
+preview_replay: false
