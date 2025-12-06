@@ -3,7 +3,7 @@ from typing import List, Dict
 from execution.orders import Trade, TradeStatus
 from app_logging.event_logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger("trades", filename="trades.log")
 
 
 def compute_metrics(trades: List[Trade], starting_balance: float) -> Dict:
@@ -22,14 +22,12 @@ def compute_metrics(trades: List[Trade], starting_balance: float) -> Dict:
     wins = [t for t in closed_trades if t.pnl_usd > 0]
     win_rate = (len(wins) / num_trades * 100.0) if num_trades > 0 else 0.0
 
-    durations = []
-    for t in closed_trades:
-        if t.opened_at and t.closed_at:
-            durations.append((t.closed_at - t.opened_at).total_seconds())
-
-    avg_duration = sum(durations) / len(durations) if durations else 0.0
-    max_duration = max(durations) if durations else 0.0
-    min_duration = min(durations) if durations else 0.0
+    durations = [
+        (t.closed_at - t.opened_at).total_seconds() for t in closed_trades
+    ] or [0.0]
+    avg_duration = sum(durations) / len(durations)
+    max_duration = max(durations)
+    min_duration = min(durations)
 
     metrics = {
         "starting_balance": starting_balance,

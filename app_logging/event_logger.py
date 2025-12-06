@@ -12,11 +12,15 @@ def _ensure_log_dir() -> Path:
     return log_dir
 
 
-def get_logger(name: str) -> logging.Logger:
+def get_logger(name: str, filename: str = "trading_bot.log") -> logging.Logger:
     """
     Return a logger with a file handler and console handler.
+
+    By default logs go to trading_bot.log, but a different filename can be
+    passed to separate channels, for example trades.log.
     """
-    _ensure_log_dir()
+    log_dir = _ensure_log_dir()
+    log_file = log_dir / filename
 
     logger = logging.getLogger(name)
     if logger.handlers:
@@ -25,7 +29,7 @@ def get_logger(name: str) -> logging.Logger:
 
     logger.setLevel(logging.INFO)
 
-    file_handler = logging.FileHandler("logs/trading_bot.log")
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.INFO)
 
     console_handler = logging.StreamHandler()

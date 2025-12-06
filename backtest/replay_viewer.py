@@ -10,42 +10,41 @@ from app_logging.event_logger import get_logger
 
 logger = get_logger(__name__)
 
-# We will store df and trades in module-level variables for this simple local viewer.
+# Module-level state for the simple local viewer
 _DF: Optional[pd.DataFrame] = None
 _TRADES: Optional[List[Dict[str, Any]]] = None
 _STRATEGY: str = "sma"
+_METRICS: Optional[Dict[str, Any]] = None
 
-# Number of bars to keep visible in the replay window
-WINDOW_SIZE = 200
+WINDOW_SIZE = 150
 
 
 def _build_figure(end_index: int) -> go.Figure:
     """
     Build a candlestick figure using data up to end_index (inclusive).
 
-    Uses:
-      - Dark mode styling
-      - Crosshair-like spikelines
-      - A sliding window (last WINDOW_SIZE bars)
-      - SMA 10 and SMA 50 lines (if present)
-      - Trade overlays for entries and TP/SL levels
+    Includes:
+      - Dark theme styling
+      - Sliding window (last WINDOW_SIZE bars)
+      - SMA 10 / SMA 50 when present and strategy == 'sma'
+      - Trade overlays (entries, TP, SL)
+      - Strategy summary annotation on the right
     """
-    global _DF, _TRADES
+    global _DF, _TRADES, _STRATEGY, _METRICS
+
+    if _DF is None or _DF.empty:
+        return go.Figure()
+
     df = _DF
     trades = _TRADES or []
 
-    if df is None or df.empty:
-        return go.Figure()
-
-    # Clamp index
     end_index = max(0, min(end_index, len(df) - 1))
-
-    # Sliding window: last WINDOW_SIZE bars
     start_index = max(0, end_index - WINDOW_SIZE + 1)
     df_slice = df.iloc[start_index : end_index + 1]
 
-    # --------------- Candles ---------------
+    fig = go.Figure()
 
+    # Candles
     candle = go.Candlestick(
         x=df_slice.index,
         open=df_slice["open"],
@@ -61,11 +60,9 @@ def _build_figure(end_index: int) -> go.Figure:
             "Close: %{close}<extra></extra>"
         ),
     )
+    fig.add_trace(candle)
 
-    fig = go.Figure(data=[candle])
-
-    # --------------- SMAs (if available and strategy == 'sma') ---------------
-
+    # SMAs if strategy uses them
     if _STRATEGY == "sma":
         if "sma_fast" in df_slice.columns:
             fig.add_trace(
@@ -78,7 +75,6 @@ def _build_figure(end_index: int) -> go.Figure:
                     hoverinfo="skip",
                 )
             )
-
         if "sma_slow" in df_slice.columns:
             fig.add_trace(
                 go.Scatter(
@@ -91,69 +87,58 @@ def _build_figure(end_index: int) -> go.Figure:
                 )
             )
 
-    # --------------- Trade overlays ---------------
-
-    entries_x = []
-    entries_y = []
-
-    tp_x = []
-    tp_y = []
-    sl_x = []
-    sl_y = []
+    # Trade overlays
+    entries_x: List[Any] = []
+    entries_y: List[float] = []
 
     for tr in trades:
         entry_idx = tr["entry_index"]
         exit_idx = tr["exit_index"]
         entry_price = tr["entry_price"]
-        tp = tr["take_profit"]
-        sl = tr["stop_loss"]
+        tp = tr.get("take_profit")
+        sl = tr.get("stop_loss")
 
-        # Only consider trades that have started by end_index
         if entry_idx > end_index:
             continue
 
-        # Only draw segments that overlap the current window
-        seg_start = max(entry_idx, start_index)
-        seg_end = min(exit_idx, end_index)
-        if seg_start > seg_end:
+        entry_time = df.index[entry_idx]
+        entries_x.append(entry_time)
+        entries_y.append(entry_price)
+
+        # Draw TP / SL lines for the visible part of the trade
+        visible_start = max(entry_idx, start_index)
+        visible_end = min(exit_idx, end_index)
+
+        # If the trade is completely left of the current window,
+        # or indices are reversed after clipping, skip drawing.
+        if exit_idx < start_index or visible_end < visible_start:
             continue
 
-        # Entry marker (only once, at entry bar)
-        if start_index <= entry_idx <= end_index:
-            entries_x.append(df.index[entry_idx])
-            entries_y.append(entry_price)
+        if tp is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=[df.index[visible_start], df.index[visible_end]],
+                    y=[tp, tp],
+                    mode="lines",
+                    name="Take Profit",
+                    line=dict(width=1, dash="dash"),
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
 
-        # TP line segment
-        tp_x.extend(
-            [
-                df.index[seg_start],
-                df.index[seg_end],
-                None,
-            ]
-        )
-        tp_y.extend(
-            [
-                tp,
-                tp,
-                None,
-            ]
-        )
-
-        # SL line segment
-        sl_x.extend(
-            [
-                df.index[seg_start],
-                df.index[seg_end],
-                None,
-            ]
-        )
-        sl_y.extend(
-            [
-                sl,
-                sl,
-                None,
-            ]
-        )
+        if sl is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=[df.index[visible_start], df.index[visible_end]],
+                    y=[sl, sl],
+                    mode="lines",
+                    name="Stop Loss",
+                    line=dict(width=1, dash="dot"),
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
 
     if entries_x:
         fig.add_trace(
@@ -167,41 +152,19 @@ def _build_figure(end_index: int) -> go.Figure:
             )
         )
 
-    if tp_x:
-        fig.add_trace(
-            go.Scatter(
-                x=tp_x,
-                y=tp_y,
-                mode="lines",
-                name="Take Profit",
-                line=dict(width=1, dash="dash"),
-                hoverinfo="skip",
-            )
-        )
-
-    if sl_x:
-        fig.add_trace(
-            go.Scatter(
-                x=sl_x,
-                y=sl_y,
-                mode="lines",
-                name="Stop Loss",
-                line=dict(width=1, dash="dot"),
-                hoverinfo="skip",
-            )
-        )
-
-    # --------------- Layout ---------------
-
     fig.update_layout(
         template="plotly_dark",
-        title="Backtest replay",
-        xaxis_title="Time",
-        yaxis_title="Price",
-        xaxis_rangeslider_visible=False,
-        hovermode="x",
-        paper_bgcolor="#111111",
         plot_bgcolor="#111111",
+        paper_bgcolor="#111111",
+        font=dict(color="#FFFFFF"),
+        margin=dict(l=40, r=200, t=50, b=40),
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1.0,
+            xanchor="left",
+            x=1.02,
+        ),
         xaxis=dict(
             showspikes=True,
             spikemode="across",
@@ -220,6 +183,30 @@ def _build_figure(end_index: int) -> go.Figure:
         ),
     )
 
+    # Strategy summary annotation
+    metrics = _METRICS or {}
+    if metrics:
+        text_lines = [
+            f"Start: {metrics.get('starting_balance', 0):.2f}",
+            f"End: {metrics.get('ending_balance', 0):.2f}",
+            f"Net: {metrics.get('net_profit', 0):.2f}",
+            f"Return: {metrics.get('net_return_pct', 0):.2f} %",
+            f"Trades: {metrics.get('num_trades', 0)}",
+        ]
+        summary_text = "<br>".join(text_lines)
+
+        fig.add_annotation(
+            x=1.02,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            text=summary_text,
+            showarrow=False,
+            align="left",
+            font=dict(size=11, color="#FFFFFF"),
+            bgcolor="rgba(0, 0, 0, 0.5)",
+        )
+
     return fig
 
 
@@ -229,31 +216,27 @@ def run_replay_viewer(
     timeframe: str,
     trades: Optional[List[Dict[str, Any]]] = None,
     strategy: str = "sma",
-):
+    metrics: Optional[Dict[str, Any]] = None,
+) -> None:
     """
     Start a Dash app that replays candles bar-by-bar.
 
     Controls:
-      - Play / Pause buttons
+      - Play / Pause / Step buttons
       - Speed selector (Slow / Normal / Fast)
-      - End button (instantly jump to final bar)
-
-    Visuals:
-      - Candlesticks
-      - SMA 10 and SMA 50 (if present)
-      - Entry markers
-      - TP and SL horizontal bands
+      - End button (jump to final bar)
     """
-    global _DF, _TRADES, _STRATEGY
+    global _DF, _TRADES, _STRATEGY, _METRICS
+
     _DF = df.copy()
     _TRADES = trades or []
     _STRATEGY = strategy.lower()
+    _METRICS = metrics or {}
 
     if _DF.empty:
         logger.warning("Replay viewer started with empty dataframe.")
         return
 
-    # Start a little bit into the data so you see some history immediately
     start_index = max(0, min(50, len(_DF) - 1))
 
     app = dash.Dash(__name__)
@@ -289,6 +272,12 @@ def run_replay_viewer(
                                 style={"marginRight": "10px"},
                             ),
                             html.Button(
+                                "Step",
+                                id="btn-step",
+                                n_clicks=0,
+                                style={"marginRight": "10px"},
+                            ),
+                            html.Button(
                                 "End",
                                 id="btn-end",
                                 n_clicks=0,
@@ -298,10 +287,7 @@ def run_replay_viewer(
                     ),
                     html.Div(
                         [
-                            html.Label(
-                                "Speed:",
-                                style={"marginRight": "5px"},
-                            ),
+                            html.Span("Speed:", style={"marginRight": "8px"}),
                             dcc.Dropdown(
                                 id="speed-dropdown",
                                 options=[
@@ -311,14 +297,9 @@ def run_replay_viewer(
                                 ],
                                 value="normal",
                                 clearable=False,
-                                style={
-                                    "width": "150px",
-                                    "backgroundColor": "#222222",
-                                    "color": "#FFFFFF",
-                                },
+                                style={"width": "140px"},
                             ),
-                        ],
-                        style={"display": "flex", "alignItems": "center"},
+                        ]
                     ),
                 ],
             ),
@@ -329,26 +310,25 @@ def run_replay_viewer(
             ),
             dcc.Interval(
                 id="replay-interval",
-                interval=400,  # ms, will be updated by speed
+                interval=400,
                 n_intervals=0,
-                disabled=True,  # start paused
+                disabled=True,
             ),
             dcc.Store(id="current-index", data=start_index),
         ],
     )
-
-    # --------- Callbacks ---------
 
     @app.callback(
         [Output("replay-interval", "disabled"), Output("replay-interval", "interval")],
         [
             Input("btn-play", "n_clicks"),
             Input("btn-pause", "n_clicks"),
+            Input("btn-step", "n_clicks"),
             Input("speed-dropdown", "value"),
         ],
         prevent_initial_call=True,
     )
-    def control_interval(play_clicks, pause_clicks, speed_value):
+    def control_interval(play_clicks, pause_clicks, step_clicks, speed_value):
         """
         Control whether the interval is running and at what speed.
         """
@@ -369,7 +349,7 @@ def run_replay_viewer(
 
         if trigger_id == "btn-play":
             disabled = False
-        elif trigger_id == "btn-pause":
+        elif trigger_id in ("btn-pause", "btn-step"):
             disabled = True
         else:
             disabled = _dash.no_update
@@ -381,15 +361,19 @@ def run_replay_viewer(
         [
             Input("replay-interval", "n_intervals"),
             Input("btn-end", "n_clicks"),
+            Input("btn-step", "n_clicks"),
         ],
         State("current-index", "data"),
     )
-    def update_chart(n_intervals, end_clicks, current_index):
+    def update_chart(n_intervals, end_clicks, step_clicks, current_index):
         """
-        Advance the current index by one bar on each interval tick,
-        or jump straight to the final bar when the End button is clicked.
+        Advance the current index on each interval tick,
+        jump to the end when End is pressed,
+        or move forward exactly one bar when Step is pressed.
         """
         import dash as _dash
+
+        global _DF
 
         if _DF is None or _DF.empty:
             return go.Figure(), current_index
@@ -407,6 +391,13 @@ def run_replay_viewer(
             end_index = len(_DF) - 1
             fig = _build_figure(end_index)
             return fig, end_index
+
+        if trigger_id == "btn-step":
+            if current_index >= len(_DF) - 1:
+                return _build_figure(current_index), current_index
+            next_index = current_index + 1
+            fig = _build_figure(next_index)
+            return fig, next_index
 
         # Interval tick
         if current_index >= len(_DF) - 1:

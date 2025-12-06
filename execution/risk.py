@@ -34,3 +34,25 @@ def compute_equal_sized_orders(
     per_order_size = risk_amount / denom
     sizes = [per_order_size for _ in entries]
     return sizes
+
+def compute_position_size(
+    account_size: float,
+    risk_pct: float,
+    entry_price: float,
+    stop_loss: float,
+) -> float:
+    """
+    Compute the position size for a single-entry trade so that if the
+    position is filled and price hits stop_loss, the total loss equals
+    account_size * risk_pct.
+
+    This wraps compute_equal_sized_orders for consistency with multi-entry sizing.
+    """
+    # Reuse the validated multi-order sizing logic
+    sizes = compute_equal_sized_orders(
+        entries=[entry_price],
+        stop_loss=stop_loss,
+        account_size=account_size,
+        risk_pct=risk_pct,
+    )
+    return sizes[0]
