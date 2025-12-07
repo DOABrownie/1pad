@@ -37,7 +37,7 @@ def _prompt_timeframe(default: str = "4h") -> str:
         )
 
 
-def _prompt_strategy(default: str = "sma") -> str:
+def _prompt_strategy(default: str = "1pad") -> str:
     """
     Ask which strategy to use.
 
@@ -78,7 +78,7 @@ def get_user_config(live_mode: bool = True) -> Dict:
     timeframe = _prompt_timeframe(default=default_timeframe)
 
     # 👇 NEW: strategy selection
-    strategy = _prompt_strategy(default="sma")
+    strategy = _prompt_strategy(default="1pad")
 
     account_size_str = input(
         f"Account size in USD [{int(default_account_size)}]: "
