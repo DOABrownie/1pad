@@ -5,7 +5,9 @@ import dash
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
+import math
 
+from strategy.pivots import detect_pivots
 from app_logging.event_logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,9 +17,41 @@ _DF: Optional[pd.DataFrame] = None
 _TRADES: Optional[List[Dict[str, Any]]] = None
 _STRATEGY: str = "1pad"
 _START_BALANCE: float = 0.0
+_MS_SERIES: Optional[pd.Series] = None
 
 # Number of bars to keep visible in the replay window
 WINDOW_SIZE = 200
+
+def _compute_ms_series(df: pd.DataFrame) -> pd.Series:
+    """
+    Compute a simple market-structure series for 1pad.
+
+    A structure point is defined as a candle whose CLOSE is higher than
+    the CLOSE of the previous 4 candles and the next 4 candles.
+
+    The returned series has the same index as df and at each bar holds
+    the value of the most recent confirmed structure high (forward-fill).
+    """
+    closes = df["close"]
+    n = len(closes)
+    if n == 0:
+        return pd.Series(index=df.index, dtype="float64")
+
+    structure_points = pd.Series(index=df.index, dtype="float64")
+
+    # Need 4 candles on the left and 4 on the right
+    for i in range(4, n - 4):
+        c = closes.iloc[i]
+        left = closes.iloc[i - 4 : i]       # 4 closes on the left
+        right = closes.iloc[i + 1 : i + 5]  # 4 closes on the right
+        if (c > left).all() and (c > right).all():
+            structure_points.iloc[i] = c
+
+    # Forward-fill to create a running structure level
+    structure_series = structure_points.ffill()
+
+    return structure_series
+
 
 def _compute_equity_at_index(index: int) -> Dict[str, float]:
     """Compute equity and PnL values for the 'Strat Data' overlay.
@@ -91,6 +125,261 @@ def _compute_equity_at_index(index: int) -> Dict[str, float]:
         "realized_pnl": realized_pnl,
         "unrealized_pnl": unrealized_pnl,
     }
+
+def _add_onepad_overlays(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    trades: List[Dict[str, Any]],
+    start_index: int,
+    end_index: int,
+) -> None:
+    """
+    Add 1pad-specific visual elements to the replay chart:
+
+      - Market structure line used for BOS.
+      - BOS vertical marker (if visible).
+      - Net window (shaded box) for the current active 1pad trade.
+      - Individual limit entry levels inside the net window.
+      - Recent pivot highs/lows (last 4 of each) as markers.
+    """
+    if df is None or df.empty:
+        return
+
+    # Clamp indices into the dataframe range
+    n = len(df)
+    if n == 0:
+        return
+
+    start_index = max(0, min(int(start_index), n - 1))
+    end_index = max(0, min(int(end_index), n - 1))
+    if end_index < start_index:
+        return
+
+    df_slice = df.iloc[start_index : end_index + 1]
+    if df_slice.empty:
+        return
+
+    x_start = df.index[start_index]
+    x_end = df.index[end_index]
+
+    # ------- Market structure series (4L/4R close-based) -------
+    global _MS_SERIES
+    ms_series = _MS_SERIES
+    if ms_series is not None:
+        try:
+            ms_slice = ms_series.iloc[start_index : end_index + 1]
+
+            if not ms_slice.empty:
+                ms_visible = ms_slice.copy()
+
+                # Number of right-hand candles required for confirmation
+                rh = 4
+
+                if len(ms_visible) > rh:
+                    # We want to show only structure levels that are fully confirmed
+                    # (i <= end_index - rh), but extend the last confirmed level
+                    # horizontally all the way to the current bar.
+                    last_confirm_idx = ms_visible.index[-rh - 1]
+                    last_confirm_val = ms_visible.loc[last_confirm_idx]
+
+                    # If we have at least one confirmed structure value, freeze
+                    # the last `rh` bars at that confirmed level so the line
+                    # extends to the right without introducing future-informed pivots.
+                    if pd.notna(last_confirm_val):
+                        ms_visible.iloc[-rh:] = last_confirm_val
+                    else:
+                        # No confirmed structure yet, keep as-is (likely all NaN).
+                        pass
+
+                # Drop any leading NaNs before plotting
+                ms_visible = ms_visible.dropna()
+                if not ms_visible.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=ms_visible.index,
+                            y=ms_visible.values,
+                            mode="lines",
+                            name="Market Structure",
+                            line=dict(width=1, dash="dot"),
+                            hoverinfo="skip",
+                        )
+                    )
+        except Exception as e:
+            logger.debug(f"Error drawing market structure series: {e}")
+
+    # ------- Recent pivot highs and lows (last 4 of each) -------
+    try:
+        _, pivot_highs, pivot_lows = detect_pivots(df_slice, left=1, right=1)
+
+        ph_points = [
+            (ts, price)
+            for ts, price in pivot_highs.dropna().items()
+        ]
+        pl_points = [
+            (ts, price)
+            for ts, price in pivot_lows.dropna().items()
+        ]
+
+        ph_points = ph_points[-4:]
+        pl_points = pl_points[-4:]
+
+        if ph_points:
+            fig.add_trace(
+                go.Scatter(
+                    x=[p[0] for p in ph_points],
+                    y=[p[1] for p in ph_points],
+                    mode="markers",
+                    name="Pivot High",
+                    marker=dict(size=8, symbol="triangle-up"),
+                    hovertemplate="PH<br>Time: %{x}<br>Price: %{y}<extra></extra>",
+                )
+            )
+
+        if pl_points:
+            fig.add_trace(
+                go.Scatter(
+                    x=[p[0] for p in pl_points],
+                    y=[p[1] for p in pl_points],
+                    mode="markers",
+                    name="Pivot Low",
+                    marker=dict(size=8, symbol="triangle-down"),
+                    hovertemplate="PL<br>Time: %{x}<br>Price: %{y}<extra></extra>",
+                )
+            )
+    except Exception as e:
+        logger.debug(f"Error computing pivots for 1pad overlay: {e}")
+
+    # ------- Active 1pad trade (for net window, limit orders, BOS/structure) -------
+    active_trades: List[Dict[str, Any]] = []
+    for tr in trades:
+        meta = tr.get("meta") or tr.get("onepad_meta")
+        if not isinstance(meta, dict):
+            continue
+
+        entry_idx = tr.get("entry_index")
+        exit_idx = tr.get("exit_index")
+        if entry_idx is None or exit_idx is None:
+            continue
+
+        # Only consider trades that have started by this bar
+        if entry_idx <= end_index:
+            active_trades.append({"trade": tr, "meta": meta})
+
+    if not active_trades:
+        return
+
+    # Use the most recent such trade
+    context = active_trades[-1]
+    tr = context["trade"]
+    meta = context["meta"]
+
+    entry_idx = int(tr["entry_index"])
+    exit_idx = int(tr["exit_index"])
+
+    # Restrict the x-extent of the net window to the visible region
+    idx0 = max(start_index, entry_idx)
+    idx1 = min(end_index, exit_idx)
+    if idx0 >= n or idx1 < idx0:
+        idx0 = start_index
+        idx1 = end_index
+
+    x0 = df.index[idx0]
+    x1 = df.index[idx1]
+
+    # Structure line used for BOS (if available)
+    structure_level = None
+    if isinstance(meta, dict):
+        structure_level = meta.get("structure_level")
+    try:
+        if structure_level is not None and not (
+            isinstance(structure_level, float) and math.isnan(structure_level)
+        ):
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_start, x_end],
+                    y=[structure_level, structure_level],
+                    mode="lines",
+                    name="Structure",
+                    line=dict(width=1, dash="dot"),
+                    hoverinfo="skip",
+                )
+            )
+    except Exception as e:
+        logger.debug(f"Error drawing structure line for 1pad overlay: {e}")
+
+    # BOS vertical marker (if BOS candle is inside the visible window)
+    bos_index = meta.get("bos_index") if isinstance(meta, dict) else None
+    try:
+        if bos_index is not None and bos_index in df.index:
+            bos_time = bos_index
+            if x_start <= bos_time <= x_end:
+                fig.add_shape(
+                    type="line",
+                    xref="x",
+                    yref="paper",
+                    x0=bos_time,
+                    x1=bos_time,
+                    y0=0.0,
+                    y1=1.0,
+                    line=dict(width=1, dash="dash", color="#888888"),
+                )
+                fig.add_annotation(
+                    xref="x",
+                    yref="paper",
+                    x=bos_time,
+                    y=1.0,
+                    xanchor="left",
+                    yanchor="bottom",
+                    showarrow=False,
+                    text="BOS",
+                    font=dict(size=10),
+                )
+    except Exception as e:
+        logger.debug(f"Error drawing BOS marker for 1pad overlay: {e}")
+
+    # Net window (shaded box)
+    net = meta.get("net") if isinstance(meta, dict) else None
+    if isinstance(net, dict):
+        top = net.get("top")
+        bottom = net.get("bottom")
+        try:
+            if top is not None and bottom is not None and bottom < top:
+                fig.add_shape(
+                    type="rect",
+                    xref="x",
+                    yref="y",
+                    x0=x0,
+                    x1=x1,
+                    y0=bottom,
+                    y1=top,
+                    line=dict(width=1, color="#666666"),
+                    fillcolor="rgba(80, 80, 80, 0.25)",
+                )
+        except Exception as e:
+            logger.debug(f"Error drawing net window for 1pad overlay: {e}")
+
+    # Individual limit entry levels inside the net window
+    entry_levels = tr.get("entry_levels")
+    if entry_levels:
+        order_x: List = []
+        order_y: List = []
+        try:
+            for price in entry_levels:
+                order_x.extend([x0, x1, None])
+                order_y.extend([price, price, None])
+
+            fig.add_trace(
+                go.Scatter(
+                    x=order_x,
+                    y=order_y,
+                    mode="lines",
+                    name="Limit Orders",
+                    line=dict(width=1),
+                    hoverinfo="skip",
+                )
+            )
+        except Exception as e:
+            logger.debug(f"Error drawing limit order levels for 1pad overlay: {e}")
 
 def _build_figure(end_index: int) -> go.Figure:
     """
@@ -264,6 +553,10 @@ def _build_figure(end_index: int) -> go.Figure:
             )
         )
 
+    # --------------- 1pad-specific overlays ---------------
+    if _STRATEGY == "1pad":
+        _add_onepad_overlays(fig, df, trades, start_index, end_index)
+
     # --------------- Layout ---------------
 
     fig.update_layout(
@@ -360,7 +653,7 @@ def run_replay_viewer(
       - Entry markers
       - TP and SL horizontal bands
     """
-    global _DF, _TRADES, _STRATEGY, _START_BALANCE
+    global _DF, _TRADES, _STRATEGY, _START_BALANCE, _MS_SERIES
     _DF = df.copy()
     _TRADES = trades or []
     _STRATEGY = strategy.lower()
@@ -368,6 +661,17 @@ def run_replay_viewer(
         _START_BALANCE = float(starting_balance)
     except Exception:
         _START_BALANCE = 0.0
+
+    # Pre-compute market structure series for 1pad
+    try:
+        if _STRATEGY == "1pad":
+            _MS_SERIES = _compute_ms_series(_DF)
+        else:
+            _MS_SERIES = None
+    except Exception as e:
+        logger.debug(f"Error computing market structure series: {e}")
+        _MS_SERIES = None
+
 
     if _DF.empty:
         logger.warning("Replay viewer started with empty dataframe.")

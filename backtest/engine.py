@@ -476,6 +476,8 @@ def run_backtest(config: Dict):
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
                 "size": size,
+                "entry_levels": signal.get("entries"),
+                "meta": signal.get("meta"),
             }
         )
 

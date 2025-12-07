@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import pandas as pd
 
@@ -123,6 +123,69 @@ def _sma_generate_signal(
 
     return signal
 
+def _compute_ms_and_bos(
+    df: pd.DataFrame,
+    left: int = 4,
+    right: int = 4,
+) -> Tuple[Optional[float], Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+    """
+    Compute market structure (MS) and the last bullish BOS, using CLOSE-based
+    swing highs with `left` candles on the left and `right` candles on the right.
+
+    Returns:
+        (structure_level, structure_index, bos_index)
+
+        - structure_level: close price of the pivot high that defines the
+          structure level used for the BOS.
+        - structure_index: timestamp of that pivot high.
+        - bos_index: timestamp of the last bar whose close breaks above
+          that structure_level (with previous close <= structure_level).
+    """
+    n = len(df)
+    if n < left + right + 1:
+        return None, None, None
+
+    closes = df["close"].values
+    idxs = df.index
+
+    swing_high_positions = []
+
+    # Find all swing-high pivots using 4L / 4R closes
+    for i in range(left, n - right):
+        c = closes[i]
+        if c > closes[i - left : i].max() and c > closes[i + 1 : i + 1 + right].max():
+            swing_high_positions.append(i)
+
+    if not swing_high_positions:
+        return None, None, None
+
+    last_bos_pivot_pos: Optional[int] = None
+    last_bos_bar_pos: Optional[int] = None
+
+    # For each pivot, look for a BOS (first close > structure_level)
+    for pivot_pos in swing_high_positions:
+        structure_level = closes[pivot_pos]
+
+        bos_for_this_pivot: Optional[int] = None
+        for j in range(pivot_pos + 1, n):
+            prev_close = closes[j - 1]
+            cur_close = closes[j]
+            if prev_close <= structure_level and cur_close > structure_level:
+                bos_for_this_pivot = j
+
+        if bos_for_this_pivot is not None:
+            if last_bos_bar_pos is None or bos_for_this_pivot > last_bos_bar_pos:
+                last_bos_bar_pos = bos_for_this_pivot
+                last_bos_pivot_pos = pivot_pos
+
+    if last_bos_bar_pos is None or last_bos_pivot_pos is None:
+        return None, None, None
+
+    structure_level = closes[last_bos_pivot_pos]
+    structure_index = idxs[last_bos_pivot_pos]
+    bos_index = idxs[last_bos_bar_pos]
+
+    return float(structure_level), structure_index, bos_index
 
 def _onepad_generate_signal(
     df: pd.DataFrame,
@@ -198,21 +261,17 @@ def _onepad_generate_signal(
     highs = df["high"]
     lows = df["low"]
 
-    # ----------------- Market structure & BOS -----------------
-    structure_high = closes.rolling(structure_lookback).max()
-    prev_structure = structure_high.shift(1)
-
-    # Bullish BOS when close breaks above previous structure high
-    bos_up = closes > prev_structure
-
     current_idx = df.index[-1]
-    bos_indices = bos_up[bos_up].index
 
-    if bos_indices.empty:
+    # ----------------- Market structure & BOS (MS-based) -----------------
+    # MS is defined as swing-high closes with 4L / 4R, exactly as in the viewer.
+    # BOS is the last bar whose close breaks above that MS level.
+    structure_level, _, bos_idx = _compute_ms_and_bos(df, left=4, right=4)
+
+    if structure_level is None or bos_idx is None:
+        # No confirmed structure and BOS yet
         return None
 
-    # Use the most recent BOS before the current bar
-    bos_idx = bos_indices[-1]
     if bos_idx >= current_idx:
         # BOS is on or after the current bar -> wait for more data
         return None
@@ -230,12 +289,14 @@ def _onepad_generate_signal(
         return None
     ph_idx = ph_candidates.index[-1]
 
-    # Most recent pivot low before that pivot high
+    # Most recent pivot low BEFORE the BOS candle
+    # (this is the PL whose low we use for the swing low and FIBs)
     pl_candidates = pivot_lows.dropna()
-    pl_candidates = pl_candidates[pl_candidates.index < ph_idx]
+    pl_candidates = pl_candidates[pl_candidates.index < bos_idx]
     if pl_candidates.empty:
         return None
     pl_idx = pl_candidates.index[-1]
+
 
     swing_low = float(lows.loc[pl_idx])
     swing_high = float(highs.loc[ph_idx])
@@ -276,26 +337,21 @@ def _onepad_generate_signal(
     if zone_bottom >= zone_top:
         return None
 
-    # ----------------- First touch of the net window -----------------
-    cur_low = float(lows.loc[current_idx])
-    cur_high = float(highs.loc[current_idx])
+    # At this point we have:
+    #   - BOS up
+    #   - a pivot high (PH) after that BOS
+    #   - a pivot low (PL) before that PH
+    #   - a valid fib swing and net window [zone_bottom, zone_top]
+    #
+    # 1pad requirement:
+    #   Place the bundle of limit orders as soon as the PH has formed after BOS,
+    #   not on first touch of the net window. Actual fills will be simulated
+    #   later in the backtest engine.
+    #
+    # So we no longer wait for "touches_now" here and move directly on to
+    # building the limit bundle.
+    # ----------------- Build the limit entry bundle -----------------
 
-    # Does the current candle enter the net zone at all?
-    touches_now = (cur_low <= zone_top) and (cur_high >= zone_bottom)
-    if not touches_now:
-        return None
-
-    # Ensure this is the FIRST bar since the pivot high that touches the zone
-    cur_pos = df.index.get_loc(current_idx)
-    ph_pos = df.index.get_loc(ph_idx)
-    if cur_pos - ph_pos > 1:
-        low_hist = lows.iloc[ph_pos + 1 : cur_pos]
-        high_hist = highs.iloc[ph_pos + 1 : cur_pos]
-        if not low_hist.empty:
-            touched_before = (low_hist <= zone_top) & (high_hist >= zone_bottom)
-            if touched_before.any():
-                # The zone was touched earlier; the "first touch" already happened.
-                return None
 
     # ----------------- Build the limit entry bundle -----------------
     num_orders = int(config.get("num_limit_orders", 4))
@@ -324,6 +380,7 @@ def _onepad_generate_signal(
             "bos_index": bos_idx,
             "pivot_high_index": ph_idx,
             "pivot_low_index": pl_idx,
+            "structure_level": structure_level,
             "fib_levels": {
                 "0": float(fib_0),
                 "0.236": float(fib_0236),
