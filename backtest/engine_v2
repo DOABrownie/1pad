@@ -4,6 +4,7 @@ from datetime import datetime
 
 import ccxt
 import pandas as pd
+import asyncio
 
 from app_logging.event_logger import get_logger
 from strategy.signals import generate_signal
@@ -49,7 +50,44 @@ def _fetch_ohlcv_history(
         f"Fetching OHLCV: symbol={symbol}, timeframe={timeframe}, limit={limit}"
     )
 
+async def get_data():
+    ex = cx.binance()
+    dt_minus_4h = datetime.now(timezone.utc) - timedelta(hours=4)
+    iso_str = dt_minus_4h.strftime('%Y-%m-%dT%H:%M:%SZ')
+    from_ts = ex.parse8601(iso_str)
+    ohlcv_list = []
+    for i in range(c.len):
+        c.tickers.append(c.coin_list[i] + "/USDT")
+        if c.og_qty_list[0][f'c{i+1}_og_qty'] == 0.0:
+            from_ts = ex.parse8601(c.start_time)
+        ohlcv = ex.fetch_ohlcv(symbol=c.tickers[i], timeframe=c.timeframe, since=from_ts, limit=1000)
+        ohlcv_list.append(ohlcv)
+        while True:
+            from_ts = ohlcv[-1][0]
+            logger.info(c.tickers[i])
+            new_ohlcv = ex.fetch_ohlcv(c.tickers[i], c.timeframe, since=from_ts, limit=1000)
+            ohlcv.extend(new_ohlcv)
+            if len(new_ohlcv) != 1000:
+                break
+        
+        ohlcv_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        ohlcv_df['timestamp'] = pd.to_datetime(ohlcv_df['timestamp'], unit='ms')
+        if i == 0:
+            v.sm['time'] = ohlcv_df['timestamp']
+        v.sm[f'c{i+1}c'] = ohlcv_df['close']
+
+
+
+
+
+
+
+
     raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+
+
+
+
 
     if not raw:
         logger.warning("No OHLCV data returned from exchange.")
