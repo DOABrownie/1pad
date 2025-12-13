@@ -84,22 +84,19 @@ def run_backtest(config: Dict):
     #    if d.2, this means that the current candle has closed higher and price is moving upwards, this means that we are still v.waiting_for_ph to become true, so go back to d)
     # f) following down the d.1 branch. when orders have been placed with their respective same TP and SL values we now just wait until one of two events occuring, these are:
     #    f.1 orders being filled
-    #    f.2 orders not being filled and a new higher ph being formed. this generates the next action point, which is
+    #    f.2 orders not filled and a new higher ph being formed. this generates the next action point, which is
     #        f.2.1.1 all current open orders need to be canceled.
     #        f.2.1.2 new fib levels, tp, sl and net zones need to be calcualted and orders placed at the new values of the last pl to the newest ph. this process now reverts to v.monitoring==True
-
-    #
-
-
-
-    df = _add_indicators(df, config)
+    # g) when any order gets filled v.df(position_size) needs to be edited to reflect the total position size (more on this to come)
+    # h) if ever v.position > 0.0 v.df(ms) has to be == 0.0, as well as v.looking_for_ph == False, this is because we are now in an open position state 
+    #    and no other technical analysis required until one of 2 event happen, these are:
+    #    h.1) price hits the TP value and we now become v.df(position_size) == 0.0 and we start from the begining, or
+    #    h.2) price hits the SL value and we now become v.df(position_size) == 0.0 and we start from the begining.
+    #    for both h.1) and h1.2 we will need to update position PNL, total balance and all other performance metrices.
 
     trades: List[Trade] = []
     trades_for_view: List[Dict] = []
     balance = account_size
-
-    # Start after 50 bars so SMAs are well defined
-    i = 50
 
     while i < len(df) - 1:
         df_slice = df.iloc[: i + 1]
