@@ -5,6 +5,7 @@ from datetime import datetime
 import ccxt
 import pandas as pd
 import asyncio
+import vars as v
 
 from app_logging.event_logger import get_logger
 from strategy.signals import generate_signal
@@ -14,304 +15,30 @@ from backtest.metrics import compute_metrics
 
 logger = get_logger(__name__)
 
-
-# ----------------- Exchange / data helpers -----------------
-
-
-def _create_exchange() -> ccxt.Exchange:
-    """
-    Create a ccxt exchange instance for backtesting data.
-
-    Using Binance for now (public data).
-    """
-    exchange_id = "binance"
-    exchange_class = getattr(ccxt, exchange_id)
-    exchange = exchange_class(
-        {
-            "enableRateLimit": True,
-        }
-    )
-    return exchange
-
-
-def _fetch_ohlcv_history(
-    exchange: ccxt.Exchange,
-    symbol: str,
-    timeframe: str,
-    limit: int,
-) -> pd.DataFrame:
-    """
-    Fetch OHLCV candles from the exchange and return as a pandas DataFrame.
-
-    Columns: [open, high, low, close, volume]
-    Index:   timestamp (datetime)
-    """
-    logger.info(
-        f"Fetching OHLCV: symbol={symbol}, timeframe={timeframe}, limit={limit}"
-    )
-
 async def get_data():
-    ex = cx.binance()
+    ex = ccxt.binance()
     dt_minus_4h = datetime.now(timezone.utc) - timedelta(hours=4)
     iso_str = dt_minus_4h.strftime('%Y-%m-%dT%H:%M:%SZ')
     from_ts = ex.parse8601(iso_str)
     ohlcv_list = []
+    """
     for i in range(c.len):
         c.tickers.append(c.coin_list[i] + "/USDT")
         if c.og_qty_list[0][f'c{i+1}_og_qty'] == 0.0:
-            from_ts = ex.parse8601(c.start_time)
-        ohlcv = ex.fetch_ohlcv(symbol=c.tickers[i], timeframe=c.timeframe, since=from_ts, limit=1000)
-        ohlcv_list.append(ohlcv)
-        while True:
-            from_ts = ohlcv[-1][0]
-            logger.info(c.tickers[i])
-            new_ohlcv = ex.fetch_ohlcv(c.tickers[i], c.timeframe, since=from_ts, limit=1000)
-            ohlcv.extend(new_ohlcv)
-            if len(new_ohlcv) != 1000:
-                break
-        
-        ohlcv_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        ohlcv_df['timestamp'] = pd.to_datetime(ohlcv_df['timestamp'], unit='ms')
-        if i == 0:
-            v.sm['time'] = ohlcv_df['timestamp']
-        v.sm[f'c{i+1}c'] = ohlcv_df['close']
-
-
-
-
-
-
-
-
-    raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-
-
-
-
-
-    if not raw:
-        logger.warning("No OHLCV data returned from exchange.")
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-
-    df = pd.DataFrame(
-        raw,
-        columns=["timestamp", "open", "high", "low", "close", "volume"],
-    )
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df.set_index("timestamp", inplace=True)
-
-    logger.info(f"Fetched {len(df)} candles.")
-    return df
-
-
-def _add_indicators(df: pd.DataFrame, config: Dict) -> pd.DataFrame:
     """
-    Add any indicator columns needed for the selected strategy.
 
-    For now:
-      - If strategy == 'sma':
-          * sma_fast: 10 period SMA of close
-          * sma_slow: 50 period SMA of close
-
-      - If strategy == '1pad':
-          * we do nothing yet (placeholder for future pivots/BOS/fibs etc.)
-    """
-    strategy_name = config.get("strategy", "1pad").lower()
-
-    if strategy_name == "sma":
-        closes = df["close"]
-        df["sma_fast"] = closes.rolling(10).mean()
-        df["sma_slow"] = closes.rolling(50).mean()
-
-    elif strategy_name == "1pad":
-        # Placeholder for future 1pad-specific preparatory columns
-        # e.g. pivot highs/lows, structure labels, etc.
-        pass
-
-    return df
-
-
-
-# ----------------- Simple trade simulation -----------------
-
-
-def _simulate_trade(
-    df: pd.DataFrame,
-    start_idx: int,
-    direction: str,
-    entry_price: float,
-    stop_loss: float,
-    take_profit: float,
-) -> Tuple[int, float]:
-    """
-    Simulate a simple trade from start_idx onwards.
-
-    Assumptions:
-      - Entry at the close of bar at index start_idx.
-      - For each subsequent bar, we check:
-
-          long:
-            if low <= SL -> SL hit
-            elif high >= TP -> TP hit
-
-          short:
-            if high >= SL -> SL hit
-            elif low <= TP -> TP hit
-
-      - If neither SL nor TP hit by the end of data,
-        exit at the last close.
-
-    Returns:
-        (exit_index, exit_price)
-    """
-    for i in range(start_idx + 1, len(df)):
-        high = df["high"].iloc[i]
-        low = df["low"].iloc[i]
-
-        if direction == "long":
-            if low <= stop_loss:
-                return i, stop_loss
-            if high >= take_profit:
-                return i, take_profit
-        else:  # short
-            if high >= stop_loss:
-                return i, stop_loss
-            if low <= take_profit:
-                return i, take_profit
-
-    exit_idx = len(df) - 1
-    exit_price = df["close"].iloc[-1]
-    return exit_idx, exit_price
-
-
-def _pnl_for_trade(
-    direction: str,
-    entry_price: float,
-    exit_price: float,
-    size: float,
-) -> float:
-    """
-    Compute PnL in quote currency (USD) for a trade.
-    """
-    if direction == "long":
-        return (exit_price - entry_price) * size
-    else:
-        return (entry_price - exit_price) * size
-
-def _simulate_limit_bundle_trade(
-    df: pd.DataFrame,
-    start_idx: int,
-    direction: str,
-    entries: List[float],
-    sizes: List[float],
-    stop_loss: float,
-    take_profit: float,
-) -> Tuple[int, float, float, float]:
-    """
-    Simulate a trade created from a bundle of limit entries.
-
-    Orders:
-      - A list of (entry_price, size) pairs.
-      - All share the same stop_loss and take_profit.
-
-    Behaviour:
-      - Orders become active from the bar AFTER start_idx.
-      - On each subsequent bar, any unfilled orders whose price falls within
-        the bar's [low, high] range are considered filled at their limit price.
-      - Once there is any open size, we monitor for SL/TP:
-          * long:
-              if low <= SL -> exit at SL
-              elif high >= TP -> exit at TP
-          * short:
-              if high >= SL -> exit at SL
-              elif low <= TP -> exit at TP
-      - When an exit is triggered, all open size is closed and remaining
-        unfilled orders are cancelled.
-
-    Returns:
-        (exit_idx, exit_price, avg_entry_price, total_filled_size)
-
-        If no order ever fills, total_filled_size will be 0.0 and
-        exit_idx/exit_price/avg_entry_price will be None.
-    """  # noqa: D401
-    if not entries or not sizes or len(entries) != len(sizes):
-        return None, None, None, 0.0
-
-    n_bars = len(df)
-    if start_idx >= n_bars - 1:
-        return None, None, None, 0.0
-
-    # Track orders
-    orders = [
-        {
-            "price": float(price),
-            "size": float(size),
-            "filled": False,
-        }
-        for price, size in zip(entries, sizes)
-    ]
-
-    total_size = 0.0
-    avg_entry_price = None
-    exit_idx = None
-    exit_price = None
-
-    # Iterate over bars AFTER the signal bar
-    for i in range(start_idx + 1, n_bars):
-        high = float(df["high"].iloc[i])
-        low = float(df["low"].iloc[i])
-
-        # 1) Check for new fills on this bar
-        for order in orders:
-            if order["filled"]:
-                continue
-
-            price = order["price"]
-
-            # Consider the order filled if the bar's range trades through it.
-            if low <= price <= high:
-                # Fill at the limit price
-                order["filled"] = True
-
-                prev_notional = (avg_entry_price or 0.0) * total_size
-                total_size += order["size"]
-                avg_entry_price = (prev_notional + price * order["size"]) / total_size
-
-        # If we still have no open position, continue scanning forward
-        if total_size <= 0.0:
-            continue
-
-        # 2) Once there is open size, monitor SL/TP
-        if direction == "long":
-            if low <= stop_loss:
-                exit_idx = i
-                exit_price = float(stop_loss)
-                break
-            if high >= take_profit:
-                exit_idx = i
-                exit_price = float(take_profit)
-                break
-        else:  # short
-            if high >= stop_loss:
-                exit_idx = i
-                exit_price = float(stop_loss)
-                break
-            if low <= take_profit:
-                exit_idx = i
-                exit_price = float(take_profit)
-                break
-
-    if total_size <= 0.0:
-        # No order ever filled
-        return None, None, None, 0.0
-
-    if exit_idx is None:
-        # No SL/TP hit by the end of data -> exit at last close
-        exit_idx = n_bars - 1
-        exit_price = float(df["close"].iloc[-1])
-
-    return exit_idx, exit_price, float(avg_entry_price), float(total_size)
-
+    from_ts = ex.parse8601(v.start_time)
+    ohlcv = ex.fetch_ohlcv(symbol=v.symbol, timeframe=v.timeframe, since=from_ts, limit=1000)
+    ohlcv_list.append(ohlcv)
+    while True:
+        from_ts = ohlcv[-1][0]
+        new_ohlcv = ex.fetch_ohlcv(symbol=v.symbol, timeframe = v.timeframe, since=from_ts, limit=1000)
+        ohlcv.extend(new_ohlcv)
+        if len(new_ohlcv) != 1000:
+            break
+    
+    v.df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    v.df['timestamp'] = pd.to_datetime(v.df['timestamp'], unit='ms')
 
 # ----------------- Backtest loop -----------------
 
@@ -321,7 +48,7 @@ def run_backtest(config: Dict):
     Backtest entry point.
 
     Flow:
-      1. Load OHLCV data.
+      1. Load OHLCV data. (sent to v.df
       2. Add SMA indicators.
       3. Step through candles, calling strategy.generate_signal(df_slice, config).
       4. For 'market_entry' signals, simulate trades with SL/TP.
@@ -331,24 +58,39 @@ def run_backtest(config: Dict):
     logger.info("Backtest started.")
     logger.info(f"Config: {config}")
 
-    symbol = config["symbol"]
-    timeframe = config["timeframe"]
-    lookback_bars = int(config["lookback_bars"])
+    v.coin = config["symbol"]
+    v.timeframe = config["timeframe"]
+    v.lookback_bars = int(config["lookback_bars"])
     preview = bool(config.get("preview_replay", False))
     account_size = float(config["account_size"])
     risk_pct = float(config["risk_pct"])
 
-    exchange = _create_exchange()
-    df = _fetch_ohlcv_history(
-        exchange=exchange,
-        symbol=symbol,
-        timeframe=timeframe,
-        limit=lookback_bars,
-    )
+    await get_data()
 
     if df.empty:
         logger.warning("Backtest aborted, no OHLCV data loaded.")
         return
+    # we dont need to add any indicators here. we need to process the data frame one candle at a time, making decisions on the following:
+    # a) do we have MS def find_ms() (find_ms() needs to be defined in the .strategy folder (MS = 4 closes left and right of a candle), 
+    #    if market structure exists then we need to add the value of the MS to a new column in the v.df, this value needs to be added to each subsequent row until v.position==True
+    # b) do we have BMS (break of market structure. current candle close > v.df(ms)
+    #    this is only in the long direction at this time and only exists if we are not in a position (need to make check against v.position (true/false))
+    # c) if we do have BMS then the var v.looking_for_ph == True. this triggers the fact that we are in stage 2 of setup, v.df(MS)!=0.0 and one of the close values since has closed above v.df(ms)
+    # d) when v.looking_for_ph == True there are 2 possible events that can occur, these are:
+    #    d.1) current candle close forms a PH, or
+    #    d.2) current candle close does not form a PH.
+    # e) if d.1 == true, we calculate the fib levels 0, 0.236, 0.618 and 1 from the last pl to the current ph, determine the net zone and place the orders.
+    #    this turns v.monitoring_order == True
+    #    if d.2, this means that the current candle has closed higher and price is moving upwards, this means that we are still v.waiting_for_ph to become true, so go back to d)
+    # f) following down the d.1 branch. when orders have been placed with their respective same TP and SL values we now just wait until one of two events occuring, these are:
+    #    f.1 orders being filled
+    #    f.2 orders not being filled and a new higher ph being formed. this generates the next action point, which is
+    #        f.2.1.1 all current open orders need to be canceled.
+    #        f.2.1.2 new fib levels, tp, sl and net zones need to be calcualted and orders placed at the new values of the last pl to the newest ph. this process now reverts to v.monitoring==True
+
+    #
+
+
 
     df = _add_indicators(df, config)
 
@@ -545,3 +287,271 @@ def run_backtest(config: Dict):
             starting_balance=account_size,
         )
     logger.info("Backtest finished.")
+
+
+
+
+"""
+
+# ----------------- Exchange / data helpers -----------------
+
+
+def _create_exchange() -> ccxt.Exchange:
+    """
+    Create a ccxt exchange instance for backtesting data.
+
+    Using Binance for now (public data).
+    """
+    exchange_id = "binance"
+    exchange_class = getattr(ccxt, exchange_id)
+    exchange = exchange_class(
+        {
+            "enableRateLimit": True,
+        }
+    )
+    return exchange
+
+
+def _fetch_ohlcv_history(
+    exchange: ccxt.Exchange,
+    symbol: str,
+    timeframe: str,
+    limit: int,
+) -> pd.DataFrame:
+    """
+    Fetch OHLCV candles from the exchange and return as a pandas DataFrame.
+
+    Columns: [open, high, low, close, volume]
+    Index:   timestamp (datetime)
+    
+    logger.info(
+        f"Fetching OHLCV: symbol={symbol}, timeframe={timeframe}, limit={limit}"
+    raw = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+
+    if not raw:
+        logger.warning("No OHLCV data returned from exchange.")
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    df = pd.DataFrame(
+        raw,
+        columns=["timestamp", "open", "high", "low", "close", "volume"],
+    )
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df.set_index("timestamp", inplace=True)
+
+    logger.info(f"Fetched {len(df)} candles.")
+    return df
+    """
+
+def _add_indicators(df: pd.DataFrame, config: Dict) -> pd.DataFrame:
+    """
+    Add any indicator columns needed for the selected strategy.
+
+    For now:
+      - If strategy == 'sma':
+          * sma_fast: 10 period SMA of close
+          * sma_slow: 50 period SMA of close
+
+      - If strategy == '1pad':
+          * we do nothing yet (placeholder for future pivots/BOS/fibs etc.)
+    """
+    strategy_name = config.get("strategy", "1pad").lower()
+
+    if strategy_name == "sma":
+        closes = df["close"]
+        df["sma_fast"] = closes.rolling(10).mean()
+        df["sma_slow"] = closes.rolling(50).mean()
+
+    elif strategy_name == "1pad":
+        # Placeholder for future 1pad-specific preparatory columns
+        # e.g. pivot highs/lows, structure labels, etc.
+        pass
+
+    return df
+
+
+
+# ----------------- Simple trade simulation -----------------
+
+
+def _simulate_trade(
+    df: pd.DataFrame,
+    start_idx: int,
+    direction: str,
+    entry_price: float,
+    stop_loss: float,
+    take_profit: float,
+) -> Tuple[int, float]:
+    """
+    Simulate a simple trade from start_idx onwards.
+
+    Assumptions:
+      - Entry at the close of bar at index start_idx.
+      - For each subsequent bar, we check:
+
+          long:
+            if low <= SL -> SL hit
+            elif high >= TP -> TP hit
+
+          short:
+            if high >= SL -> SL hit
+            elif low <= TP -> TP hit
+
+      - If neither SL nor TP hit by the end of data,
+        exit at the last close.
+
+    Returns:
+        (exit_index, exit_price)
+    """
+    for i in range(start_idx + 1, len(df)):
+        high = df["high"].iloc[i]
+        low = df["low"].iloc[i]
+
+        if direction == "long":
+            if low <= stop_loss:
+                return i, stop_loss
+            if high >= take_profit:
+                return i, take_profit
+        else:  # short
+            if high >= stop_loss:
+                return i, stop_loss
+            if low <= take_profit:
+                return i, take_profit
+
+    exit_idx = len(df) - 1
+    exit_price = df["close"].iloc[-1]
+    return exit_idx, exit_price
+
+def _pnl_for_trade(
+    direction: str,
+    entry_price: float,
+    exit_price: float,
+    size: float,
+) -> float:
+    """
+    Compute PnL in quote currency (USD) for a trade.
+    """
+    if direction == "long":
+        return (exit_price - entry_price) * size
+    else:
+        return (entry_price - exit_price) * size
+
+def _simulate_limit_bundle_trade(
+    df: pd.DataFrame,
+    start_idx: int,
+    direction: str,
+    entries: List[float],
+    sizes: List[float],
+    stop_loss: float,
+    take_profit: float,
+) -> Tuple[int, float, float, float]:
+    """
+    Simulate a trade created from a bundle of limit entries.
+
+    Orders:
+      - A list of (entry_price, size) pairs.
+      - All share the same stop_loss and take_profit.
+
+    Behaviour:
+      - Orders become active from the bar AFTER start_idx.
+      - On each subsequent bar, any unfilled orders whose price falls within
+        the bar's [low, high] range are considered filled at their limit price.
+      - Once there is any open size, we monitor for SL/TP:
+          * long:
+              if low <= SL -> exit at SL
+              elif high >= TP -> exit at TP
+          * short:
+              if high >= SL -> exit at SL
+              elif low <= TP -> exit at TP
+      - When an exit is triggered, all open size is closed and remaining
+        unfilled orders are cancelled.
+
+    Returns:
+        (exit_idx, exit_price, avg_entry_price, total_filled_size)
+
+        If no order ever fills, total_filled_size will be 0.0 and
+        exit_idx/exit_price/avg_entry_price will be None.
+    """  # noqa: D401
+    if not entries or not sizes or len(entries) != len(sizes):
+        return None, None, None, 0.0
+
+    n_bars = len(df)
+    if start_idx >= n_bars - 1:
+        return None, None, None, 0.0
+
+    # Track orders
+    orders = [
+        {
+            "price": float(price),
+            "size": float(size),
+            "filled": False,
+        }
+        for price, size in zip(entries, sizes)
+    ]
+
+    total_size = 0.0
+    avg_entry_price = None
+    exit_idx = None
+    exit_price = None
+
+    # Iterate over bars AFTER the signal bar
+    for i in range(start_idx + 1, n_bars):
+        high = float(df["high"].iloc[i])
+        low = float(df["low"].iloc[i])
+
+        # 1) Check for new fills on this bar
+        for order in orders:
+            if order["filled"]:
+                continue
+
+            price = order["price"]
+
+            # Consider the order filled if the bar's range trades through it.
+            if low <= price <= high:
+                # Fill at the limit price
+                order["filled"] = True
+
+                prev_notional = (avg_entry_price or 0.0) * total_size
+                total_size += order["size"]
+                avg_entry_price = (prev_notional + price * order["size"]) / total_size
+
+        # If we still have no open position, continue scanning forward
+        if total_size <= 0.0:
+            continue
+
+        # 2) Once there is open size, monitor SL/TP
+        if direction == "long":
+            if low <= stop_loss:
+                exit_idx = i
+                exit_price = float(stop_loss)
+                break
+            if high >= take_profit:
+                exit_idx = i
+                exit_price = float(take_profit)
+                break
+        else:  # short
+            if high >= stop_loss:
+                exit_idx = i
+                exit_price = float(stop_loss)
+                break
+            if low <= take_profit:
+                exit_idx = i
+                exit_price = float(take_profit)
+                break
+
+    if total_size <= 0.0:
+        # No order ever filled
+        return None, None, None, 0.0
+
+    if exit_idx is None:
+        # No SL/TP hit by the end of data -> exit at last close
+        exit_idx = n_bars - 1
+        exit_price = float(df["close"].iloc[-1])
+
+    return exit_idx, exit_price, float(avg_entry_price), float(total_size)
+
+
+
+
+
+"""
